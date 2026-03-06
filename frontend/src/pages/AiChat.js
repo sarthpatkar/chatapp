@@ -137,6 +137,7 @@ export default function AIChat() {
   const [input, setInput]         = useState("");
   const [conversationId, setConversationId] = useState(initialConversationId);
   const [messages, setMessages]   = useState(() => getCachedMessages(initialConversationId));
+  const [recentConversations, setRecentConversations] = useState([]);
   const [darkMode, setDarkMode]   = useState(true);
   const [streaming, setStreaming] = useState(false);
   const [showScrollBtn, setShowScrollBtn] = useState(false);
@@ -179,9 +180,37 @@ export default function AIChat() {
         id: `h-${i}-a`,
         sender: "ai",
         text: item.response || "",
+        model: item.modelUsed || "unknown",
         time: item.createdAt || new Date().toISOString(),
       },
     ]));
+
+  const buildConversationSummaries = (history) => {
+    const byConversation = new Map();
+    for (const item of history || []) {
+      const normalizedId = normalizeConversationId(item?.conversationId);
+      if (!normalizedId) continue;
+
+      const existing = byConversation.get(normalizedId) || {
+        conversationId: normalizedId,
+        preview: "Conversation",
+        updatedAt: item?.createdAt || new Date().toISOString(),
+      };
+
+      const userText = (item?.message || "").trim();
+      if (userText) {
+        existing.preview = userText;
+      }
+      if (item?.createdAt) {
+        existing.updatedAt = item.createdAt;
+      }
+
+      byConversation.set(normalizedId, existing);
+    }
+
+    return Array.from(byConversation.values())
+      .sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
+  };
 
   /* ── Persist selected conversation per user ── */
   useEffect(() => {
@@ -193,18 +222,19 @@ export default function AIChat() {
     const loadHistory = async () => {
       setHistoryLoaded(false);
       try {
+        const res = await api.get("/api/chat/history");
+        const history = res.data || [];
+        setRecentConversations(buildConversationSummaries(history));
+
         if (conversationId) {
-          const res = await api.get("/api/chat/history", {
-            params: { conversationId },
-          });
-          const history = res.data || [];
-          setMessages(mapHistoryToMessages(history));
+          const activeHistory = history.filter(
+            (item) => normalizeConversationId(item.conversationId) === conversationId
+          );
+          setMessages(mapHistoryToMessages(activeHistory));
           return;
         }
 
         // Legacy bootstrap: no conversation selected yet.
-        const res = await api.get("/api/chat/history");
-        const history = res.data || [];
 
         // If DB already has conversation IDs, resume latest conversation automatically.
         const latestConversationWithId = [...history]
@@ -225,6 +255,7 @@ export default function AIChat() {
           window.location.replace("/login");
           return;
         }
+        setRecentConversations([]);
         setMessages(getCachedMessages(conversationId));
       } finally {
         setHistoryLoaded(true);
@@ -306,6 +337,14 @@ export default function AIChat() {
     localStorage.removeItem(getChatStorageKey(newConversationId));
     setConversationId(newConversationId);
     setMessages([]);
+    setRecentConversations((prev) => [
+      {
+        conversationId: newConversationId,
+        preview: "New conversation",
+        updatedAt: new Date().toISOString(),
+      },
+      ...prev.filter((item) => item.conversationId !== newConversationId),
+    ]);
     toast.info("New conversation created");
   };
 
@@ -316,6 +355,9 @@ export default function AIChat() {
       });
       setMessages([]);
       localStorage.removeItem(chatStorageKey);
+      setRecentConversations((prev) =>
+        prev.filter((item) => item.conversationId !== conversationId)
+      );
       toast.info("Conversation history cleared");
     } catch (err) {
       if (err?.response?.status === 401 || err?.response?.status === 403) {
@@ -359,6 +401,44 @@ export default function AIChat() {
     return origin;
   };
 
+  const normalizeErrorMessage = (payload) => {
+    if (!payload) return null;
+    if (typeof payload === "string") return payload;
+    if (typeof payload === "object") {
+      return (
+        payload.message ||
+        payload.error ||
+        payload.detail ||
+        payload.title ||
+        null
+      );
+    }
+    return null;
+  };
+
+  const cleanErrorMessage = (message) => {
+    if (!message) return null;
+    const singleLine = String(message).replace(/\s+/g, " ").trim();
+    if (!singleLine) return null;
+    if (singleLine.length <= 220) return singleLine;
+    return `${singleLine.slice(0, 217)}...`;
+  };
+
+  const readFetchError = async (res) => {
+    try {
+      const raw = await res.text();
+      if (!raw) return null;
+      try {
+        const parsed = JSON.parse(raw);
+        return cleanErrorMessage(normalizeErrorMessage(parsed) || raw);
+      } catch {
+        return cleanErrorMessage(raw);
+      }
+    } catch {
+      return null;
+    }
+  };
+
   /* ── Send message ── */
   const send = async (forced) => {
     const text = (forced || input).trim();
@@ -372,6 +452,7 @@ export default function AIChat() {
       setMessages([]);
     }
     const aiId  = `ai-${Date.now()}`;
+    const createdAt = new Date().toISOString();
     if (!token) {
       toast.error("Session expired. Please log in again.");
       clearAuth();
@@ -379,13 +460,36 @@ export default function AIChat() {
       return;
     }
 
+    setRecentConversations((prev) => {
+      const withoutCurrent = prev.filter((item) => item.conversationId !== activeConversationId);
+      return [
+        {
+          conversationId: activeConversationId,
+          preview: text,
+          updatedAt: createdAt,
+        },
+        ...withoutCurrent,
+      ];
+    });
+
     setMessages(prev => ([
       ...prev,
-      { sender: "user", text, time: new Date().toISOString(), id: `u-${aiId}` },
-      { sender: "ai",   text: "",   time: new Date().toISOString(), id: aiId,   streaming: true },
+      { sender: "user", text, time: createdAt, id: `u-${aiId}` },
+      { sender: "ai",   text: "",   time: createdAt, id: aiId,   streaming: true, model: "resolving..." },
     ]));
     setInput("");
     setStreaming(true);
+
+    const markAiError = (message) => {
+      const finalMessage = cleanErrorMessage(message) || "Something went wrong. Please try again.";
+      setMessages(prev =>
+        prev.map(m =>
+          m.id === aiId
+            ? { ...m, text: finalMessage, streaming: false, error: true }
+            : m
+        )
+      );
+    };
 
     try {
       const streamUrl = `${getBaseUrl()}/api/chat/stream`;
@@ -400,6 +504,15 @@ export default function AIChat() {
       });
 
       if (res.body && res.ok) {
+        const streamModel = (res.headers.get("X-AI-Model") || "").trim();
+        if (streamModel) {
+          setMessages(prev =>
+            prev.map(m =>
+              m.id === aiId ? { ...m, model: streamModel } : m
+            )
+          );
+        }
+
         const reader  = res.body.getReader();
         readerRef.current = reader; // FIX: store so stopGen can cancel it
         const decoder = new TextDecoder();
@@ -410,6 +523,15 @@ export default function AIChat() {
         // The backend sends lines like:  data: Hello  /  data: 👋  /  data:  How
         // We must NOT trim content after stripping the "data:" prefix.
         const handleChunk = (rawLine) => {
+          const appendToAi = (token) => {
+            if (!token) return;
+            setMessages(prev =>
+              prev.map(m =>
+                m.id === aiId ? { ...m, text: m.text + token } : m
+              )
+            );
+          };
+
           let content = rawLine;
           if (rawLine.startsWith("data: ")) {
             content = rawLine.slice(6); // strip exactly "data: " (6 chars), keep rest verbatim
@@ -419,6 +541,8 @@ export default function AIChat() {
 
           // Skip SSE control lines and heartbeats
           if (content === "[DONE]" || rawLine.startsWith(":")) return;
+          if (content === "\\n") { appendToAi("\n"); return; }
+          if (content === "\\r") { appendToAi("\r"); return; }
           // Empty content after stripping prefix → skip
           if (content === "") return;
 
@@ -426,12 +550,7 @@ export default function AIChat() {
           // (emoji that were split across fetch chunks)
           const safe = content.replace(/\uFFFD/g, "");
           if (!safe) return;
-
-          setMessages(prev =>
-            prev.map(m =>
-              m.id === aiId ? { ...m, text: m.text + safe } : m
-            )
-          );
+          appendToAi(safe);
         };
 
         try {
@@ -469,28 +588,55 @@ export default function AIChat() {
         return;
       }
 
-      // FALLBACK: normal JSON endpoint
-      const fallback = await api.post("/api/chat", {
-        message: text,
-        conversationId: activeConversationId,
-      });
-      const reply = fallback.data?.response || fallback.data?.reply || "No response received.";
+      const streamError = await readFetchError(res);
+      if (res.status === 401 || res.status === 403) {
+        clearAuth();
+        window.location.replace("/login");
+        return;
+      }
 
-      setMessages(prev =>
-        prev.map(m =>
-          m.id === aiId ? { ...m, text: reply, streaming: false } : m
-        )
-      );
-    } catch (err) {
-      if (err?.name !== "AbortError") {
-        toast.error("Failed to get a response. Please try again.");
+      try {
+        // FALLBACK: normal JSON endpoint
+        const fallback = await api.post("/api/chat", {
+          message: text,
+          conversationId: activeConversationId,
+        });
+        const reply = fallback.data?.response || fallback.data?.reply || "No response received.";
+        const model = (fallback.data?.model || "unknown").trim();
+
         setMessages(prev =>
           prev.map(m =>
-            m.id === aiId
-              ? { ...m, text: "Something went wrong. Please try again.", streaming: false, error: true }
-              : m
+            m.id === aiId ? { ...m, text: reply, streaming: false, model } : m
           )
         );
+      } catch (fallbackErr) {
+        if (fallbackErr?.response?.status === 401 || fallbackErr?.response?.status === 403) {
+          clearAuth();
+          window.location.replace("/login");
+          return;
+        }
+
+        const fallbackMessage = cleanErrorMessage(
+          normalizeErrorMessage(fallbackErr?.response?.data) ||
+          fallbackErr?.message ||
+          streamError
+        );
+        throw new Error(fallbackMessage || "Something went wrong. Please try again.");
+      }
+    } catch (err) {
+      if (err?.name !== "AbortError") {
+        if (err?.response?.status === 401 || err?.response?.status === 403) {
+          clearAuth();
+          window.location.replace("/login");
+          return;
+        }
+
+        const message = cleanErrorMessage(
+          normalizeErrorMessage(err?.response?.data) ||
+          err?.message
+        );
+        toast.error(message || "Failed to get a response. Please try again.");
+        markAiError(message);
       }
     } finally {
       readerRef.current = null;
@@ -529,11 +675,36 @@ export default function AIChat() {
         .msg-content p:last-child { margin-bottom: 0; }
         .msg-content ul, .msg-content ol { margin: 8px 0 10px 20px; }
         .msg-content li { margin-bottom: 4px; line-height: 1.65; }
-        .msg-content h1,.msg-content h2,.msg-content h3 { margin: 14px 0 6px; font-family: 'Sora', sans-serif; }
+        .msg-content h1,.msg-content h2,.msg-content h3 {
+          margin: 14px 0 6px;
+          font-family: 'Sora', sans-serif;
+          line-height: 1.35;
+          letter-spacing: -0.01em;
+        }
+        .msg-content h1 { font-size: 24px; font-weight: 700; }
+        .msg-content h2 { font-size: 20px; font-weight: 700; }
+        .msg-content h3 { font-size: 17px; font-weight: 600; }
         .msg-content strong { font-weight: 600; }
         .msg-content blockquote {
           border-left: 3px solid currentColor; padding-left: 14px;
           margin: 10px 0; opacity: 0.7; font-style: italic;
+        }
+        .msg-content table {
+          width: 100%;
+          border-collapse: collapse;
+          margin: 12px 0;
+          font-size: 13.5px;
+          line-height: 1.55;
+        }
+        .msg-content th, .msg-content td {
+          border: 1px solid rgba(140,140,160,0.35);
+          padding: 8px 10px;
+          text-align: left;
+          vertical-align: top;
+        }
+        .msg-content th {
+          background: rgba(140,140,160,0.12);
+          font-weight: 600;
         }
         .msg-content code {
           font-family: 'JetBrains Mono', monospace;
@@ -621,25 +792,36 @@ export default function AIChat() {
           <div style={{ height: 1, background: C.border, margin: "0 16px 10px" }} />
 
           {/* Recent chats */}
-          {messages.length > 0 && (
+          {recentConversations.length > 0 && (
             <div style={{ padding: "0 10px", flex: 1, overflow: "hidden" }}>
               <p style={{ fontSize: 10.5, fontWeight: 600, color: C.textDim, textTransform: "uppercase", letterSpacing: "0.07em", marginBottom: 6, paddingLeft: 4 }}>
                 Recent
               </p>
-              <button
-                style={{
-                  width: "100%", display: "flex", alignItems: "center", gap: 8,
-                  padding: "8px 10px", borderRadius: 8,
-                  background: C.accentDim, border: "none",
-                  color: C.text, cursor: "pointer", fontSize: 13,
-                  fontFamily: FONT, textAlign: "left",
-                }}
-              >
-                <MessageSquare size={13} style={{ flexShrink: 0, color: C.accent }} />
-                <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 12.5 }}>
-                  {messages.find(m => m.sender === "user")?.text?.slice(0, 28) || "Conversation"}…
-                </span>
-              </button>
+              <div style={{ display: "flex", flexDirection: "column", gap: 6, overflowY: "auto", maxHeight: "100%" }}>
+                {recentConversations.map((item) => {
+                  const isActive = item.conversationId === conversationId;
+                  const preview = (item.preview || "Conversation").slice(0, 38);
+                  return (
+                    <button
+                      key={item.conversationId}
+                      onClick={() => setConversationId(item.conversationId)}
+                      style={{
+                        width: "100%", display: "flex", alignItems: "center", gap: 8,
+                        padding: "8px 10px", borderRadius: 8,
+                        background: isActive ? C.accentDim : "transparent",
+                        border: `1px solid ${isActive ? C.accentGlow : C.border}`,
+                        color: C.text, cursor: "pointer", fontSize: 13,
+                        fontFamily: FONT, textAlign: "left",
+                      }}
+                    >
+                      <MessageSquare size={13} style={{ flexShrink: 0, color: isActive ? C.accent : C.textMuted }} />
+                      <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 12.5 }}>
+                        {preview}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
             </div>
           )}
 
@@ -961,11 +1143,28 @@ function EmptyState({ C, onSuggest }) {
 /* ═══════════════════════════════════════════
    MESSAGE ROW
 ═══════════════════════════════════════════ */
+function normalizeMarkdownForRender(rawText) {
+  if (typeof rawText !== "string") return "";
+
+  let text = rawText.replace(/\r\n/g, "\n");
+  const looksLikeCollapsedTable =
+    text.includes("|") && !text.includes("\n") && text.includes("||");
+
+  if (looksLikeCollapsedTable) {
+    text = text
+      .replace(/:\s*\|/g, ":\n|")
+      .replace(/\|\|/g, "|\n|");
+  }
+
+  return text;
+}
+
 function MessageRow({ msg, idx, C, copiedId, doCopy, fmtTime }) {
   const [hovered, setHovered] = useState(false);
   const isUser    = msg.sender === "user";
   const msgCopyId = `msg-${idx}`;
   const codeCopyId = `code-${idx}`;
+  const renderedMarkdown = normalizeMarkdownForRender(msg.text || "");
 
   return (
     <motion.div
@@ -1078,9 +1277,53 @@ function MessageRow({ msg, idx, C, copiedId, doCopy, fmtTime }) {
                       </div>
                     );
                   },
+                  table({ children }) {
+                    return (
+                      <div style={{ overflowX: "auto", margin: "12px 0", width: "100%" }}>
+                        <table style={{ width: "100%", minWidth: 520, borderCollapse: "collapse" }}>
+                          {children}
+                        </table>
+                      </div>
+                    );
+                  },
+                  th({ children }) {
+                    return (
+                      <th style={{
+                        border: `1px solid ${C.border}`,
+                        backgroundColor: C.surface,
+                        padding: "8px 10px",
+                        fontSize: 13,
+                        fontWeight: 600,
+                        textAlign: "left",
+                        fontFamily: FONT,
+                      }}>
+                        {children}
+                      </th>
+                    );
+                  },
+                  td({ children }) {
+                    return (
+                      <td style={{
+                        border: `1px solid ${C.border}`,
+                        padding: "8px 10px",
+                        fontSize: 13.5,
+                        verticalAlign: "top",
+                        fontFamily: FONT,
+                      }}>
+                        {children}
+                      </td>
+                    );
+                  },
+                  p({ children }) {
+                    return (
+                      <p style={{ margin: "0 0 10px", lineHeight: 1.72, fontSize: 14.5, fontFamily: FONT }}>
+                        {children}
+                      </p>
+                    );
+                  },
                 }}
               >
-                {msg.text}
+                {renderedMarkdown}
               </ReactMarkdown>
             ) : (
               /* Skeleton shimmer while waiting for first chunk */
@@ -1101,6 +1344,12 @@ function MessageRow({ msg, idx, C, copiedId, doCopy, fmtTime }) {
             {msg.error && (
               <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 8, color: C.danger, fontSize: 12 }}>
                 <AlertCircle size={13} /> Error receiving response
+              </div>
+            )}
+
+            {!isUser && (
+              <div style={{ marginTop: 8, fontSize: 11, color: C.textDim }}>
+                Model: {msg.model || "unknown"}
               </div>
             )}
           </div>

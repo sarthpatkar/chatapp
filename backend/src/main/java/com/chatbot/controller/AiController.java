@@ -5,6 +5,8 @@ import com.chatbot.repository.ChatMessageRepository;
 import com.chatbot.service.AiService;
 import com.chatbot.service.RuleEngineService;
 import com.chatbot.security.JwtUtil;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.web.bind.annotation.*;
 
 import java.time.LocalDateTime;
@@ -23,8 +25,9 @@ import org.springframework.transaction.annotation.Transactional;
 
 @RestController
 @RequestMapping("/api/chat")
-@CrossOrigin
+@CrossOrigin(exposedHeaders = "X-AI-Model")
 public class AiController {
+    private static final Logger logger = LoggerFactory.getLogger(AiController.class);
 
     private final AiService aiService;
     private final RuleEngineService ruleEngineService;
@@ -51,13 +54,17 @@ public class AiController {
         Long userId = extractUserIdFromAuthHeader(authHeader);
 
         String response;
+        String modelUsed;
 
         // 1️⃣ Check rule engine first
         response = ruleEngineService.checkRules(message);
+        modelUsed = "rule-engine";
 
         // 2️⃣ If no rule matched → call AI
         if (response == null) {
-            response = aiService.getAiResponse(message);
+            AiService.AiReply aiReply = aiService.getAiReply(message);
+            response = aiReply.responseText();
+            modelUsed = normalizeModelUsed(aiReply.modelUsed());
         }
 
         // 3️⃣ Save chat to database
@@ -66,13 +73,20 @@ public class AiController {
         chat.setConversationId(conversationId);
         chat.setMessage(message);
         chat.setResponse(response);
+        chat.setModelUsed(modelUsed);
         chat.setCreatedAt(LocalDateTime.now());
 
-        chatRepository.save(chat);
+        try {
+            chatRepository.save(chat);
+        } catch (Exception ex) {
+            logger.error("Failed to save non-stream chat message for userId={} conversationId={}",
+                    userId, conversationId, ex);
+        }
 
         Map<String, String> result = new HashMap<>();
         result.put("response", response);
         result.put("conversationId", conversationId);
+        result.put("model", modelUsed);
 
         return result;
     }
@@ -86,31 +100,46 @@ public class AiController {
         String message = requireMessage(request);
         String conversationId = resolveConversationId(request.get("conversationId"));
         Long userId = extractUserIdFromAuthHeader(authHeader);
+        String response = ruleEngineService.checkRules(message);
+        String modelUsed = "rule-engine";
+
+        if (response == null) {
+            AiService.AiReply aiReply = aiService.getAiReply(message);
+            response = aiReply.responseText();
+            modelUsed = normalizeModelUsed(aiReply.modelUsed());
+        }
+
+        final String finalResponse = response;
+        final String finalModelUsed = modelUsed;
 
         StreamingResponseBody stream = outputStream -> {
+            // Stream by Unicode code point (not UTF-16 char) so emojis are not split.
+            for (int i = 0; i < finalResponse.length(); ) {
+                int codePoint = finalResponse.codePointAt(i);
+                String token = new String(Character.toChars(codePoint));
+                String dataToken = switch (token) {
+                    case "\n" -> "\\n";
+                    case "\r" -> "\\r";
+                    default -> token;
+                };
+                String chunk = "data: " + dataToken + "\n\n";
 
-            String response;
-
-            // Rule engine first
-            response = ruleEngineService.checkRules(message);
-
-            if (response == null) {
-                response = aiService.getAiResponse(message);
-            }
-
-            // Stream by Unicode code point (not UTF-16 char) so emojis are not split into "??".
-            for (int i = 0; i < response.length(); ) {
                 try {
-                    int codePoint = response.codePointAt(i);
-                    String token = new String(Character.toChars(codePoint));
-                    String chunk = "data: " + token + "\n\n";
                     outputStream.write(chunk.getBytes(StandardCharsets.UTF_8));
-                    outputStream.flush();   // VERY IMPORTANT
+                    outputStream.flush();
                     Thread.sleep(15);
-                    i += Character.charCount(codePoint);
-                } catch (Exception e) {
-                    throw new RuntimeException(e);
+                } catch (InterruptedException ex) {
+                    Thread.currentThread().interrupt();
+                    logger.warn("Streaming interrupted for userId={} conversationId={}",
+                            userId, conversationId);
+                    break;
+                } catch (Exception ex) {
+                    logger.warn("Streaming write failed for userId={} conversationId={}: {}",
+                            userId, conversationId, ex.getMessage());
+                    break;
                 }
+
+                i += Character.charCount(codePoint);
             }
 
             // Save to DB after streaming finishes
@@ -118,13 +147,20 @@ public class AiController {
             chat.setUserId(userId);
             chat.setConversationId(conversationId);
             chat.setMessage(message);
-            chat.setResponse(response);
+            chat.setResponse(finalResponse);
+            chat.setModelUsed(finalModelUsed);
             chat.setCreatedAt(LocalDateTime.now());
 
-            chatRepository.save(chat);
+            try {
+                chatRepository.save(chat);
+            } catch (Exception ex) {
+                logger.error("Failed to save stream chat message for userId={} conversationId={}",
+                        userId, conversationId, ex);
+            }
         };
 
         return ResponseEntity.ok()
+                .header("X-AI-Model", modelUsed)
                 .contentType(MediaType.parseMediaType("text/event-stream;charset=UTF-8"))
                 .body(stream);
     }
@@ -198,5 +234,12 @@ public class AiController {
             return "conv-" + UUID.randomUUID();
         }
         return conversationId.trim();
+    }
+
+    private String normalizeModelUsed(String modelUsed) {
+        if (modelUsed == null || modelUsed.trim().isEmpty()) {
+            return "unknown";
+        }
+        return modelUsed.trim();
     }
 }

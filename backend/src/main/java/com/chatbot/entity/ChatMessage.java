@@ -23,6 +23,9 @@ public class ChatMessage {
     @Column(columnDefinition = "TEXT")
     private String response;
 
+    @Column(name = "model_used", length = 120)
+    private String modelUsed;
+
     @Column(name = "created_at")
     private LocalDateTime createdAt;
 
@@ -62,6 +65,14 @@ public class ChatMessage {
 
     public void setResponse(String response) {
         this.response = response;
+    }
+
+    public String getModelUsed() {
+        return modelUsed;
+    }
+
+    public void setModelUsed(String modelUsed) {
+        this.modelUsed = modelUsed;
     }
 
     public LocalDateTime getCreatedAt() {
