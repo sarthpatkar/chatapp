@@ -24,11 +24,15 @@ public class AiService {
     private static final long RATE_LIMIT_BACKOFF_MS = 1200L;
     private static final List<String> FALLBACK_MODELS = List.of(
             "meta-llama/llama-3.3-70b-instruct:free",
-            "google/gemma-3-27b-it:free",
             "qwen/qwen3-coder:free",
             "mistralai/mistral-small-3.1-24b-instruct:free",
+            "arcee-ai/trinity-large-preview:free",
+            "arcee-ai/trinity-mini:free",
+            "stepfun/step-3.5-flash:free",
+            "liquid/lfm-2.5-1.2b-thinking:free",
             "openai/gpt-oss-120b:free",
-            "openai/gpt-oss-20b:free"
+            "openai/gpt-oss-20b:free",
+            "google/gemma-3-27b-it:free"
     );
 
     private final ChatMessageRepository chatRepository;
