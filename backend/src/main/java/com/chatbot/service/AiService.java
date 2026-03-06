@@ -83,7 +83,13 @@ public class AiService {
         modelsToTry.addAll(FALLBACK_MODELS);
 
         String lastTransientIssue = null;
-        boolean sawRateLimit = false;
+        int transientAttempts = 0;
+        int rateLimitIssues = 0;
+        int modelUnavailableIssues = 0;
+        int emptyResponseIssues = 0;
+        int connectionIssues = 0;
+        int otherTransientIssues = 0;
+
         for (int round = 1; round <= RATE_LIMIT_RETRY_ROUNDS; round++) {
             boolean roundSawRateLimit = false;
             for (String model : modelsToTry) {
@@ -97,9 +103,18 @@ public class AiService {
                 }
                 if (result.transientIssue != null) {
                     lastTransientIssue = result.transientIssue;
+                    transientAttempts++;
                     if (isRateLimitIssue(result.transientIssue)) {
-                        sawRateLimit = true;
+                        rateLimitIssues++;
                         roundSawRateLimit = true;
+                    } else if (isModelIssue(result.transientIssue)) {
+                        modelUnavailableIssues++;
+                    } else if (isEmptyResponseIssue(result.transientIssue)) {
+                        emptyResponseIssues++;
+                    } else if (isConnectionIssue(result.transientIssue)) {
+                        connectionIssues++;
+                    } else {
+                        otherTransientIssues++;
                     }
                 }
             }
@@ -122,21 +137,45 @@ public class AiService {
         if (lastTransientIssue != null) {
             logger.warn("All OpenRouter attempts failed. Last issue: {}", lastTransientIssue);
             String lowered = lastTransientIssue.toLowerCase(Locale.ROOT);
-            if (sawRateLimit) {
+
+            if (transientAttempts > 0 && rateLimitIssues == transientAttempts) {
                 return AiReply.of("All fallback models are rate-limited right now. Please try again shortly.",
                         "unknown");
             }
-            if (lowered.contains("model not found") || lowered.contains("model rejected")) {
+            if (transientAttempts > 0 && modelUnavailableIssues == transientAttempts) {
                 return AiReply.of(
-                        "Configured model is unavailable. Use one of your fallback models and restart backend.",
+                        "All configured fallback models are currently unavailable. Update model list and restart backend.",
                         "unknown");
             }
-            if (lowered.contains("no text in choices") || lowered.contains("empty response body")) {
+            if (transientAttempts > 0 && emptyResponseIssues == transientAttempts) {
                 return AiReply.of("OpenRouter returned an empty response for this request. Please try again.",
                         "unknown");
             }
-            if (lowered.contains("timed out") || lowered.contains("connection")) {
+            if (transientAttempts > 0 && connectionIssues == transientAttempts) {
                 return AiReply.of("Unable to reach OpenRouter right now. Please try again shortly.",
+                        "unknown");
+            }
+            if (rateLimitIssues > 0) {
+                return AiReply.of(
+                        "Some fallback models are rate-limited right now, and other model attempts also failed. Please retry shortly.",
+                        "unknown");
+            }
+            if (modelUnavailableIssues > 0) {
+                return AiReply.of(
+                        "Configured fallback models were unavailable for this request. Please update fallback models.",
+                        "unknown");
+            }
+            if (emptyResponseIssues > 0) {
+                return AiReply.of(
+                        "Model returned an empty response for this request. Please retry.",
+                        "unknown");
+            }
+            if (connectionIssues > 0 || lowered.contains("timed out") || lowered.contains("connection")) {
+                return AiReply.of("Unable to reach OpenRouter right now. Please try again shortly.",
+                        "unknown");
+            }
+            if (otherTransientIssues > 0) {
+                return AiReply.of("AI service is temporarily unavailable. Please try again.",
                         "unknown");
             }
         }
@@ -193,7 +232,41 @@ public class AiService {
             String providerError = extractOpenRouterError(responseBody);
             if (providerError != null) {
                 logger.warn("OpenRouter response contained error for model {}: {}", model, providerError);
-                return OpenRouterAttemptResult.fatal("OpenRouter error: " + providerError, model);
+                String loweredError = providerError.toLowerCase(Locale.ROOT);
+
+                if (loweredError.contains("rate limit")
+                        || loweredError.contains("429")
+                        || loweredError.contains("too many requests")) {
+                    return OpenRouterAttemptResult.transientFailure(
+                            "rate limit (provider payload) for model: " + model,
+                            model);
+                }
+                if (loweredError.contains("model")
+                        && (loweredError.contains("not found")
+                        || loweredError.contains("does not exist")
+                        || loweredError.contains("unavailable"))) {
+                    return OpenRouterAttemptResult.transientFailure(
+                            "model not found: " + model,
+                            model);
+                }
+                if (loweredError.contains("invalid api key")
+                        || loweredError.contains("unauthorized")
+                        || loweredError.contains("authentication")) {
+                    return OpenRouterAttemptResult.fatal(
+                            "Invalid OPENROUTER_API_KEY. Update backend/.env and restart backend.",
+                            model);
+                }
+                if (loweredError.contains("insufficient credits")
+                        || loweredError.contains("not enough credits")
+                        || loweredError.contains("quota")) {
+                    return OpenRouterAttemptResult.fatal(
+                            "OpenRouter credits/quota exceeded. Add credits or use a free model.",
+                            model);
+                }
+
+                return OpenRouterAttemptResult.transientFailure(
+                        "provider error for model: " + model,
+                        model);
             }
 
             String text = extractOpenRouterText(responseBody);
@@ -314,6 +387,36 @@ public class AiService {
         }
         String lowered = issue.toLowerCase(Locale.ROOT);
         return lowered.contains("rate limit") || lowered.contains("429");
+    }
+
+    private boolean isModelIssue(String issue) {
+        if (issue == null) {
+            return false;
+        }
+        String lowered = issue.toLowerCase(Locale.ROOT);
+        return lowered.contains("model not found")
+                || lowered.contains("model rejected")
+                || lowered.contains("model unavailable");
+    }
+
+    private boolean isEmptyResponseIssue(String issue) {
+        if (issue == null) {
+            return false;
+        }
+        String lowered = issue.toLowerCase(Locale.ROOT);
+        return lowered.contains("no text in choices")
+                || lowered.contains("empty response body");
+    }
+
+    private boolean isConnectionIssue(String issue) {
+        if (issue == null) {
+            return false;
+        }
+        String lowered = issue.toLowerCase(Locale.ROOT);
+        return lowered.contains("timed out")
+                || lowered.contains("timeout")
+                || lowered.contains("connection")
+                || lowered.contains("network");
     }
 
     private String extractOpenRouterError(Map<?, ?> responseBody) {

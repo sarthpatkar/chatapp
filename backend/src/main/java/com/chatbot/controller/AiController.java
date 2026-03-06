@@ -3,6 +3,7 @@ package com.chatbot.controller;
 import com.chatbot.entity.ChatMessage;
 import com.chatbot.repository.ChatMessageRepository;
 import com.chatbot.service.AiService;
+import com.chatbot.service.ChatMessagePersistenceService;
 import com.chatbot.service.RuleEngineService;
 import com.chatbot.security.JwtUtil;
 import org.slf4j.Logger;
@@ -32,15 +33,18 @@ public class AiController {
     private final AiService aiService;
     private final RuleEngineService ruleEngineService;
     private final ChatMessageRepository chatRepository;
+    private final ChatMessagePersistenceService chatMessagePersistenceService;
     private final JwtUtil jwtUtil;
 
     public AiController(AiService aiService,
                         RuleEngineService ruleEngineService,
                         ChatMessageRepository chatRepository,
+                        ChatMessagePersistenceService chatMessagePersistenceService,
                         JwtUtil jwtUtil) {
         this.aiService = aiService;
         this.ruleEngineService = ruleEngineService;
         this.chatRepository = chatRepository;
+        this.chatMessagePersistenceService = chatMessagePersistenceService;
         this.jwtUtil = jwtUtil;
     }
 
@@ -77,7 +81,7 @@ public class AiController {
         chat.setCreatedAt(LocalDateTime.now());
 
         try {
-            chatRepository.save(chat);
+            chatMessagePersistenceService.save(chat);
         } catch (Exception ex) {
             logger.error("Failed to save non-stream chat message for userId={} conversationId={}",
                     userId, conversationId, ex);
@@ -152,7 +156,7 @@ public class AiController {
             chat.setCreatedAt(LocalDateTime.now());
 
             try {
-                chatRepository.save(chat);
+                chatMessagePersistenceService.save(chat);
             } catch (Exception ex) {
                 logger.error("Failed to save stream chat message for userId={} conversationId={}",
                         userId, conversationId, ex);
