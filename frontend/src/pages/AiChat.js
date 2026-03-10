@@ -3,7 +3,7 @@ import React, { useState, useRef, useEffect, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   Mic, MicOff, Send, Square, Trash2, Sun, Moon,
-  Copy, Check, ChevronDown, LogOut, Bot, User,
+  Copy, Check, ChevronDown, LogOut,
   Sparkles, MessageSquare, AlertCircle, X,
 } from "lucide-react";
 import api from "../api/axiosConfig";
@@ -88,8 +88,6 @@ const DARK = {
   accentGlow:   "rgba(0,208,156,0.25)",
   userBubbleBg: "#1e1e24",
   userBubbleBd: "#2e2e38",
-  avatarUser:   "#6457f9",
-  avatarAI:     "#00d09c",
   codeBg:       "#111115",
   codeHeader:   "#1a1a1f",
   danger:       "#ff5c5c",
@@ -110,8 +108,6 @@ const LIGHT = {
   accentGlow:   "rgba(0,168,126,0.2)",
   userBubbleBg: "#ebebef",
   userBubbleBd: "#d8d8e0",
-  avatarUser:   "#6457f9",
-  avatarAI:     "#00a87e",
   codeBg:       "#f5f5f8",
   codeHeader:   "#ebebef",
   danger:       "#e03030",
@@ -748,7 +744,7 @@ export default function AIChat() {
               <div style={{ fontFamily: "'Sora', sans-serif", fontWeight: 700, fontSize: 14, color: C.text, letterSpacing: "-0.02em" }}>
                 AI Assistant
               </div>
-              <div style={{ fontSize: 10.5, color: C.textDim, marginTop: 1 }}>Powered by Claude</div>
+              <div style={{ fontSize: 10.5, color: C.textDim, marginTop: 1 }}>Powered by chatapp</div>
             </div>
           </div>
 
@@ -845,18 +841,7 @@ export default function AIChat() {
             backgroundColor: C.sidebar,
             borderBottom: `1px solid ${C.border}`,
           }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              <div style={{
-                width: 28, height: 28, borderRadius: 8,
-                background: `linear-gradient(135deg, ${C.accent} 0%, #6457f9 100%)`,
-                display: "flex", alignItems: "center", justifyContent: "center",
-              }}>
-                <Sparkles size={13} color="#fff" />
-              </div>
-              <span style={{ fontFamily: "'Sora', sans-serif", fontWeight: 700, fontSize: 14, color: C.text }}>
-                AI Assistant
-              </span>
-            </div>
+            <div />
             <div style={{ display: "flex", gap: 4 }}>
               <IconBtn onClick={() => setDarkMode(p => !p)} C={C} title="Toggle theme">
                 {darkMode ? <Sun size={17} /> : <Moon size={17} />}
@@ -1176,26 +1161,10 @@ function MessageRow({ msg, idx, C, copiedId, doCopy, fmtTime }) {
       style={{
         display: "flex",
         alignItems: "flex-start",
-        gap: 14,
         padding: "10px 0",
-        flexDirection: isUser ? "row-reverse" : "row",
+        justifyContent: isUser ? "flex-end" : "flex-start",
       }}
     >
-      {/* Avatar */}
-      <div style={{
-        width: 34, height: 34, borderRadius: 10, flexShrink: 0,
-        background: isUser
-          ? `linear-gradient(135deg, ${C.avatarUser} 0%, #8b7ff7 100%)`
-          : `linear-gradient(135deg, ${C.accent} 0%, #0aaf84 100%)`,
-        display: "flex", alignItems: "center", justifyContent: "center",
-        boxShadow: `0 4px 12px ${isUser ? "rgba(100,87,249,0.25)" : C.accentGlow}`,
-        marginTop: 2,
-      }}>
-        {isUser
-          ? <User size={15} color="#fff" />
-          : <Bot  size={15} color="#fff" />}
-      </div>
-
       {/* Bubble / content */}
       <div style={{ maxWidth: "78%", display: "flex", flexDirection: "column", alignItems: isUser ? "flex-end" : "flex-start" }}>
 
